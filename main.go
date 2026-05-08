@@ -614,37 +614,40 @@ var builtinNames = []string{
 	"nc", "wc", "uniq", "cp", "mv", "rm",
 	"rmdir", "mkdir", "history", "head", "tail",
 	"cut", "sort", "more", "file", "echo", "targz",
-	"curl", "math", "help", "exit",
+	"ifconfig", "curl", "math",
+	"version", "help", "exit",
 }
 
 var builtinHelp = map[string]string{
 	"cd":      "cd [DIR]                    Change current directory.",
-	"pwd":     "pwd                         Print current working directory.",
-	"ls":      "ls [-a] [-l] [PATH ...]     List files; directories are shown with trailing '/'.",
-	"cat":     "cat [FILE ...]              Concatenate files to standard output.",
-	"grep":    "grep PATTERN [FILE ...]     Print lines containing PATTERN.",
-	"touch":   "touch FILE ...              Create files or update timestamps.",
-	"nc":      "nc [-u] [-l] HOST PORT      Simple TCP/UDP client or listener.",
-	"wc":      "wc [FILE ...]               Print line, word, and byte counts.",
-	"uniq":    "uniq [FILE]                 Filter adjacent duplicate lines.",
-	"cp":      "cp SRC DST                  Copy a file.",
-	"mv":      "mv SRC DST                  Rename or move a file or directory.",
-	"rm":      "rm FILE ...                 Remove files.",
-	"rmdir":   "rmdir DIR ...               Remove empty directories.",
-	"mkdir":   "mkdir [-p] DIR ...          Create directories.",
-	"history": "history [N]                 Show command history.",
-	"head":    "head [-n N] [FILE]          Print first N lines.",
-	"tail":    "tail [-n N] [FILE]          Print last N lines.",
-	"cut":     "cut -d DELIM -f LIST [FILE] Extract delimited fields.",
-	"sort":    "sort [-n] [-r] [FILE]       Sort lines.",
-	"more":    "more [FILE]                 Pager for text output.",
-	"file":    "file PATH ...               Show file type information.",
-	"echo":    "echo [-n] [-e] [ARG ...]    Print arguments.",
-	"targz":   "targz ARCHIVE.tar.gz INPUT...  Create a .tar.gz archive.",
-	"curl":    "curl [OPTIONS] URL          Minimal HTTP/HTTPS client.",
-	"math":    "math [-s N] [-b BASE] EXPR  Evaluate arithmetic expressions like fish math.",
-	"help":    "help [COMMAND ...]          Show built-in command help.",
-	"exit":    "exit                        Exit the shell.",
+	"pwd":      "pwd                         Print current working directory.",
+	"ls":       "ls [-a] [-l] [PATH ...]     List files; directories are shown with trailing '/'.",
+	"cat":      "cat [FILE ...]              Concatenate files to standard output.",
+	"grep":     "grep PATTERN [FILE ...]     Print lines containing PATTERN.",
+	"touch":    "touch FILE ...              Create files or update timestamps.",
+	"nc":       "nc [-u] [-l] HOST PORT      Simple TCP/UDP client or listener.",
+	"wc":       "wc [-l] [FILE ...]          Print line, word, and byte counts.",
+	"uniq":     "uniq [FILE]                 Filter adjacent duplicate lines.",
+	"cp":       "cp SRC DST                  Copy a file.",
+	"mv":       "mv SRC DST                  Rename or move a file or directory.",
+	"rm":       "rm FILE ...                 Remove files.",
+	"rmdir":    "rmdir DIR ...               Remove empty directories.",
+	"mkdir":    "mkdir [-p] DIR ...          Create directories.",
+	"history":  "history [N]                 Show command history.",
+	"head":     "head [-n N] [FILE]          Print first N lines.",
+	"tail":     "tail [-n N] [FILE]          Print last N lines.",
+	"cut":      "cut -d DELIM -f LIST [FILE] Extract delimited fields.",
+	"sort":     "sort [-n] [-r] [FILE]       Sort lines.",
+	"more":     "more [FILE]                 Pager for text output.",
+	"file":     "file PATH ...               Show file type information.",
+	"echo":     "echo [-n] [-e] [ARG ...]    Print arguments.",
+	"targz":    "targz ARCHIVE.tar.gz INPUT...  Create a .tar.gz archive.",
+	"ifconfig": "ifconfig Show local IPv4, DNS, gateway, mask, MAC.",
+	"curl":     "curl [OPTIONS] URL          Minimal HTTP/HTTPS client.",
+	"math":     "math [-s N] [-b BASE] EXPR  Evaluate arithmetic expressions like fish math.",
+	"version":  "version Print shell version.",
+	"help":     "help [COMMAND ...]          Show built-in command help.",
+	"exit":     "exit                        Exit the shell.",
 }
 
 func isWordByte(b rune) bool {
@@ -1373,7 +1376,15 @@ func countWC(r io.Reader) (wcResult, error) {
 	return res, nil
 }
 
-func printWC(w io.Writer, res wcResult, label string) {
+func printWC(w io.Writer, res wcResult, label string, linesOnly bool) {
+	if linesOnly {
+		if label == "" {
+			fmt.Fprintf(w, "%8d\n", res.lines)
+		} else {
+			fmt.Fprintf(w, "%8d %s\n", res.lines, label)
+		}
+		return
+	}
 	if label == "" {
 		fmt.Fprintf(w, "%8d %8d %8d\n", res.lines, res.words, res.bytes)
 	} else {
@@ -1382,13 +1393,20 @@ func printWC(w io.Writer, res wcResult, label string) {
 }
 
 func builtinWC(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	linesOnly := false
+	for _, a := range args[1:] {
+		if a == "-l" {
+			linesOnly = true
+			continue
+		}
+	}
 	if len(args) == 1 {
 		res, err := countWC(stdin)
 		if err != nil {
 			fmt.Fprintf(stderr, "wc: %v\n", err)
 			return 1
 		}
-		printWC(stdout, res, "")
+		printWC(stdout, res, "", linesOnly)
 		return 0
 	}
 
@@ -1415,14 +1433,14 @@ func builtinWC(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			status = 1
 			continue
 		}
-		printWC(stdout, res, file)
+		printWC(stdout, res, file, linesOnly)
 		total.lines += res.lines
 		total.words += res.words
 		total.bytes += res.bytes
 	}
 
 	if len(files) > 1 {
-		printWC(stdout, total, "total")
+		printWC(stdout, total, "total", linesOnly)
 	}
 	return status
 }
@@ -2514,6 +2532,32 @@ func writeResponseHeaders(w io.Writer, resp *http.Response) {
 	fmt.Fprint(w, "\r\n")
 }
 
+func builtinIFCONFIG(stdout, stderr io.Writer) int {
+	dns := "none"
+	if addrs, err := net.LookupHost(""); err == nil && len(addrs) > 0 {
+		dns = addrs[0]
+	}
+	fmt.Fprintf(stdout, "DNS: %s\n", dns)
+
+	gw := "none"
+	fmt.Fprintf(stdout, "Gateway: %s\n", gw)
+
+	ifaces, _ := net.Interfaces()
+	for _, i := range ifaces {
+		if i.Flags&(net.FlagUp|net.FlagLoopback) != net.FlagUp { continue }
+		fmt.Fprintf(stdout, "Interface: %s\nMAC: %s\n", i.Name, i.HardwareAddr)
+		if addrs, err := i.Addrs(); err == nil && len(addrs) > 0 {
+			for _, a := range addrs {
+				if ipnet, ok := a.(*net.IPNet); ok && ipnet.IP.To4() != nil {
+					fmt.Fprintf(stdout, "IPv4: %s\nMask: %s\n\n", ipnet.IP, net.IP(ipnet.Mask).String())
+					break
+				}
+			}
+		}
+	}
+	return 0
+}
+
 func builtinCURL(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	cfg, err := parseCurlArgs(args)
 	if err != nil {
@@ -2864,6 +2908,11 @@ func builtinMATH(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+func builtinVERSION(stdout io.Writer) int {
+	fmt.Fprintln(stdout, "Gsh (Unix-like shell) version 0.2")
+	return 0
+}
+ 
 func builtinHELP(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 1 {
 		names := make([]string, len(builtinNames))
@@ -2953,10 +3002,14 @@ func runBuiltin(args []string, hist *History, stdin io.Reader, stdout, stderr io
 		return builtinECHO(args, stdout, stderr)
 	case "targz":
 		return builtinTARGZ(args, stdout, stderr)
+	case "ifconfig":
+		return builtinIFCONFIG(stdout, stderr)
 	case "curl":
 		return builtinCURL(args, stdin, stdout, stderr)
 	case "math":
 		return builtinMATH(args, stdout, stderr)
+	case "version":
+		return builtinVERSION(stdout)
 	case "help":
 		return builtinHELP(args, stdout, stderr)
 	case "exit":

@@ -1,1 +1,34 @@
 # gomysh
+	Unix-like shell
+
+## builtin
+* cat
+* cd
+* cp
+* curl
+* cut
+* echo
+* exit
+* file
+* grep
+* head
+* help
+* history
+* ifconfig
+* ls
+* math
+* mkdir
+* more
+* mv
+* nc
+* pwd
+* rm
+* rmdir
+* sort
+* tail
+* targz
+* touch
+* uniq
+* version
+* wc
+
