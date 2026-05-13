@@ -1,3 +1,6 @@
+/*
+ * Last Changed: 2026-05-13 Wed 12:53:42
+ */
 package main
 
 import (
@@ -5,8 +8,13 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"crypto/md5"
+	"crypto/sha256"
+	"crypto/sha512"
+	"encoding/hex"
 	"fmt"
 	"io"
+	"hash"
 	"math"
 	"net"
 	"net/http"
@@ -26,12 +34,15 @@ import (
 )
 
 const (
+	Version = "0.3" // -ldflags="-X main.Version=1.2.3"
+
 	colorOff    = "\x1b[0m"
 	colorRed    = "\x1b[31m"
 	colorGreen  = "\x1b[32m"
 	colorYellow = "\x1b[33m"
 	colorBlue   = "\x1b[34m"
 	colorDir    = "\x1b[01;34m"
+	colorToday  = "\x1b[32m"
 
 	inputPrompt = "$ "
 )
@@ -278,20 +289,13 @@ func promptLine1Display() string {
 	hostName := currentHostName()
 	dirName := currentDirName()
 
-	left := "[" +
-	colorRed + tm + colorOff +
-	"] " +
-	colorYellow + userName + colorOff +
-	" @" +
-	colorGreen + hostName + colorOff +
-	" in " +
-	colorBlue + dirName + colorOff
-
+	left := "[" + colorRed + tm + colorOff + "] " + colorYellow + userName + colorOff +
+	        "@" + colorGreen + hostName + colorOff + " in " + colorBlue + dirName + colorOff
 	right := colorRed + dt + colorOff
 
 	width, _, err := term.GetSize(int(os.Stdout.Fd()))
 	if err != nil || width <= 0 {
-		return left + "\n" + inputPrompt
+		width = 80
 	}
 
 	leftPlain, rightPlain := promptLine1Plain()
@@ -614,12 +618,13 @@ var builtinNames = []string{
 	"nc", "wc", "uniq", "cp", "mv", "rm",
 	"rmdir", "mkdir", "history", "head", "tail",
 	"cut", "sort", "more", "file", "echo", "targz",
-	"ifconfig", "curl", "math",
+	"md5", "sha256", "sha512",	
+	"ifconfig", "curl", "math", "cal",
 	"version", "help", "exit",
 }
 
 var builtinHelp = map[string]string{
-	"cd":      "cd [DIR]                    Change current directory.",
+	"cd":       "cd [DIR]                    Change current directory.",
 	"pwd":      "pwd                         Print current working directory.",
 	"ls":       "ls [-a] [-l] [PATH ...]     List files; directories are shown with trailing '/'.",
 	"cat":      "cat [FILE ...]              Concatenate files to standard output.",
@@ -642,9 +647,13 @@ var builtinHelp = map[string]string{
 	"file":     "file PATH ...               Show file type information.",
 	"echo":     "echo [-n] [-e] [ARG ...]    Print arguments.",
 	"targz":    "targz ARCHIVE.tar.gz INPUT...  Create a .tar.gz archive.",
-	"ifconfig": "ifconfig Show local IPv4, DNS, gateway, mask, MAC.",
+	"md5":      "md5 [FILE ...]              Print MD5 checksums.",
+	"sha256":   "sha256 [FILE ...]           Print SHA-256 checksums.",
+	"sha512":   "sha512 [FILE ...]           Print SHA-512 checksums.",
+	"ifconfig": "ifconfig                    Show local IPv4, DNS, gateway, mask, MAC.",
 	"curl":     "curl [OPTIONS] URL          Minimal HTTP/HTTPS client.",
 	"math":     "math [-s N] [-b BASE] EXPR  Evaluate arithmetic expressions like fish math.",
+	"cal":      "cal [YEAR [MONTH]] Display calendar. Today is highlighted in green.",
 	"version":  "version Print shell version.",
 	"help":     "help [COMMAND ...]          Show built-in command help.",
 	"exit":     "exit                        Exit the shell.",
@@ -2908,11 +2917,108 @@ func builtinMATH(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func builtinVERSION(stdout io.Writer) int {
-	fmt.Fprintln(stdout, "Gsh (Unix-like shell) version 0.2")
+func builtinCAL(args []string, stdout, stderr io.Writer) int {
+	now := time.Now()
+	year := now.Year()
+	month := now.Month()
+
+	switch len(args) {
+	case 1:
+	case 2:
+		y, err := strconv.Atoi(args[1])
+		if err != nil {
+			fmt.Fprintf(stderr, "cal: invalid year '%s'\n", args[1])
+			return 1
+		}
+		year = y
+	case 3:
+		y, err := strconv.Atoi(args[1])
+		if err != nil {
+			fmt.Fprintf(stderr, "cal: invalid year '%s'\n", args[1])
+			return 1
+		}
+		year = y
+		m, err := strconv.Atoi(args[2])
+		if err != nil || m < 1 || m > 12 {
+			fmt.Fprintf(stderr, "cal: invalid month '%s'\n", args[2])
+			return 1
+		}
+		month = time.Month(m)
+	default:
+		fmt.Fprintln(stderr, "usage: cal [YEAR [MONTH]]")
+		return 1
+	}
+
+	t := time.Date(year, month, 1, 0, 0, 0, 0, time.UTC)
+	firstWeekday := int(t.Weekday())
+	daysInMonth := int(t.AddDate(0, 1, -1).Day())
+
+	fmt.Fprintf(stdout, "     %s %d\n", now.Format("Jan"), year)
+	fmt.Fprintln(stdout, "  Su Mo Tu We Th Fr Sa")
+
+	line := strings.Repeat("   ", firstWeekday)
+	for day := 1; day <= daysInMonth; day++ {
+		today := now.Year() == year && now.Month() == month && now.Day() == day
+		color := ""
+		reset := ""
+		if today && isTerminalWriter(stdout) {
+			color = colorToday
+			reset = colorOff
+		}
+		line += fmt.Sprintf("%s%2d%s ", color, day, reset)
+		if len(line) >= 21 {
+			fmt.Fprintln(stdout, line[:21])
+			line = ""
+		}
+	}
+	if len(line) > 0 {
+		fmt.Fprintln(stdout, line[:21])
+	}
+
 	return 0
 }
- 
+
+func builtinHash(args []string, stdin io.Reader, stdout, stderr io.Writer, newHash func() hash.Hash) int {
+	if len(args) < 2 {
+		fmt.Fprintln(stderr, "usage: hashcmd FILE ...")
+		return 1
+	}
+
+	files, err := expandWildcards(args[1:])
+	if err != nil {
+		fmt.Fprintf(stderr, "hashcmd: glob error: %v\n", err)
+		return 1
+	}
+
+	status := 0
+	for _, file := range files {
+		f, err := os.Open(file)
+		if err != nil {
+			fmt.Fprintf(stderr, "hashcmd: %s: %v\n", file, err)
+			status = 1
+			continue
+		}
+
+		h := newHash()
+		_, copyErr := io.Copy(h, f)
+		_ = f.Close()
+		if copyErr != nil {
+			fmt.Fprintf(stderr, "hashcmd: %s: %v\n", file, copyErr)
+			status = 1
+			continue
+		}
+
+		fmt.Fprintf(stdout, "%s  %s\n", hex.EncodeToString(h.Sum(nil)), file)
+	}
+
+	return status
+}
+
+func builtinVERSION(stdout io.Writer) int {
+	fmt.Fprintf(stdout, "Gsh (Unix-like shell) version %s\n", Version)
+	return 0
+}
+
 func builtinHELP(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 1 {
 		names := make([]string, len(builtinNames))
@@ -2947,7 +3053,8 @@ func isBuiltin(cmd string) bool {
 		"nc", "wc", "uniq", "cp", "mv", "rm",
 		"rmdir", "mkdir", "history", "head", "tail",
 		"cut", "sort", "more", "file", "echo", "targz",
-		"curl", "math", "help", "exit":
+		"md5", "sha256", "sha512",
+		"curl", "math", "cal", "help", "exit":
 		return true
 	default:
 		return false
@@ -3002,12 +3109,20 @@ func runBuiltin(args []string, hist *History, stdin io.Reader, stdout, stderr io
 		return builtinECHO(args, stdout, stderr)
 	case "targz":
 		return builtinTARGZ(args, stdout, stderr)
+	case "md5":
+		return builtinHash(args, stdin, stdout, stderr, md5.New)
+	case "sha256":
+		return builtinHash(args, stdin, stdout, stderr, sha256.New)
+	case "sha512":
+		return builtinHash(args, stdin, stdout, stderr, sha512.New)
 	case "ifconfig":
 		return builtinIFCONFIG(stdout, stderr)
 	case "curl":
 		return builtinCURL(args, stdin, stdout, stderr)
 	case "math":
 		return builtinMATH(args, stdout, stderr)
+	case "cal":
+		return builtinCAL(args, stdout, stderr)
 	case "version":
 		return builtinVERSION(stdout)
 	case "help":
