@@ -17,6 +17,7 @@
 * ifconfig
 * ls
 * math
+* md5
 * mkdir
 * more
 * mv
@@ -24,6 +25,8 @@
 * pwd
 * rm
 * rmdir
+* sha256
+* sha512
 * sort
 * tail
 * targz
