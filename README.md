@@ -34,4 +34,18 @@
 * uniq
 * version
 * wc
+* which
 
+## key-binding
+ Emacs like command line editing.
+
+### Todo
+* calendar
+* dos2unix / unix2dos
+* split
+* colored csv viewer
+* image viewer
+* beep
+* sleep
+* clipboard
+* for loop

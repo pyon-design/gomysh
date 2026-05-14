@@ -1,5 +1,5 @@
 /*
- * Last Changed: 2026-05-13 Wed 12:53:42
+ * Last Changed: 2026-05-14 Thu 18:08:03
  */
 package main
 
@@ -34,7 +34,7 @@ import (
 )
 
 const (
-	Version = "0.3" // -ldflags="-X main.Version=1.2.3"
+	Version = "0.4" // -ldflags="-X main.Version=1.2.3"
 
 	colorOff    = "\x1b[0m"
 	colorRed    = "\x1b[31m"
@@ -619,7 +619,7 @@ var builtinNames = []string{
 	"rmdir", "mkdir", "history", "head", "tail",
 	"cut", "sort", "more", "file", "echo", "targz",
 	"md5", "sha256", "sha512",	
-	"ifconfig", "curl", "math", "cal",
+	"ifconfig", "curl", "math", "cal", "which",
 	"version", "help", "exit",
 }
 
@@ -655,6 +655,7 @@ var builtinHelp = map[string]string{
 	"math":     "math [-s N] [-b BASE] EXPR  Evaluate arithmetic expressions like fish math.",
 	"cal":      "cal [YEAR [MONTH]] Display calendar. Today is highlighted in green.",
 	"version":  "version Print shell version.",
+	"which":    "which NAME ... Locate executable in PATH.",
 	"help":     "help [COMMAND ...]          Show built-in command help.",
 	"exit":     "exit                        Exit the shell.",
 }
@@ -3014,6 +3015,40 @@ func builtinHash(args []string, stdin io.Reader, stdout, stderr io.Writer, newHa
 	return status
 }
 
+func builtinWHICH(args []string, stdout, stderr io.Writer) int {
+	if len(args) < 2 {
+		fmt.Fprintln(stderr, "usage: which NAME ...")
+		return 1
+	}
+	status := 0
+	for _, name := range args[1:] {
+		found := false
+
+		if isBuiltin(name) {
+			fmt.Fprintln(stdout, name, "(builtin)")
+			continue
+		}
+
+		pathEnv := os.Getenv("PATH")
+		if pathEnv == "" {
+			continue
+		}
+		for _, dir := range filepath.SplitList(pathEnv) {
+			fullpath := filepath.Join(dir, name)
+			_, err := os.Stat(fullpath)
+			if err != nil {
+				continue
+			}
+			fmt.Fprintln(stdout, fullpath)
+			found = true
+		}
+		if !found {
+			status = 1
+		}
+	}
+	return status
+}
+
 func builtinVERSION(stdout io.Writer) int {
 	fmt.Fprintf(stdout, "Gsh (Unix-like shell) version %s\n", Version)
 	return 0
@@ -3054,7 +3089,8 @@ func isBuiltin(cmd string) bool {
 		"rmdir", "mkdir", "history", "head", "tail",
 		"cut", "sort", "more", "file", "echo", "targz",
 		"md5", "sha256", "sha512",
-		"curl", "math", "cal", "help", "exit":
+		"curl", "math", "cal", "which",
+		"version", "help", "exit":
 		return true
 	default:
 		return false
@@ -3123,6 +3159,8 @@ func runBuiltin(args []string, hist *History, stdin io.Reader, stdout, stderr io
 		return builtinMATH(args, stdout, stderr)
 	case "cal":
 		return builtinCAL(args, stdout, stderr)
+	case "which":
+		return builtinWHICH(args, stdout, stderr)
 	case "version":
 		return builtinVERSION(stdout)
 	case "help":
@@ -3337,6 +3375,18 @@ func main() {
 			}
 
 		case len(key) == 1 && key[0] == 0x10:
+			if line, ok := history.Prev(editor.line()); ok {
+				editor.setLine(line)
+				editor.refresh(os.Stdout)
+			}
+
+		case len(key) == 3 && key[0] == 0x1b && key[1] == 0x5b && key[2] == 0x42: // ↓ (Down)
+			if line, ok := history.Next(); ok {
+				editor.setLine(line)
+				editor.refresh(os.Stdout)
+			}
+
+		case len(key) == 3 && key[0] == 0x1b && key[1] == 0x5b && key[2] == 0x41: // ↑ (Up)
 			if line, ok := history.Prev(editor.line()); ok {
 				editor.setLine(line)
 				editor.refresh(os.Stdout)
