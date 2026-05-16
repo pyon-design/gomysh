@@ -1,5 +1,5 @@
 # gomysh
-	Unix-like shell
+Unix-like shell
 
 ## builtin
 * cat
@@ -27,7 +27,9 @@
 * rmdir
 * sha256
 * sha512
+* sleep
 * sort
+* split
 * tail
 * targz
 * touch
@@ -38,14 +40,16 @@
 
 ## key-binding
  Emacs like command line editing.
+ and history (C-n/C-p,Up/Down).
 
-### Todo
+## Todo
+### command
 * calendar
 * dos2unix / unix2dos
-* split
 * colored csv viewer
 * image viewer
-* beep
-* sleep
 * clipboard
+
+### etc
 * for loop
+* vim !

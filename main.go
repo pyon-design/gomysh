@@ -1,5 +1,5 @@
 /*
- * Last Changed: 2026-05-14 Thu 18:08:03
+ * Last Changed: 2026-05-15 Fri 19:34:53
  */
 package main
 
@@ -34,7 +34,7 @@ import (
 )
 
 const (
-	Version = "0.4" // -ldflags="-X main.Version=1.2.3"
+	Version = "0.5" // -ldflags="-X main.Version=1.2.3"
 
 	colorOff    = "\x1b[0m"
 	colorRed    = "\x1b[31m"
@@ -619,6 +619,7 @@ var builtinNames = []string{
 	"rmdir", "mkdir", "history", "head", "tail",
 	"cut", "sort", "more", "file", "echo", "targz",
 	"md5", "sha256", "sha512",	
+	"sleep", "split",
 	"ifconfig", "curl", "math", "cal", "which",
 	"version", "help", "exit",
 }
@@ -650,12 +651,14 @@ var builtinHelp = map[string]string{
 	"md5":      "md5 [FILE ...]              Print MD5 checksums.",
 	"sha256":   "sha256 [FILE ...]           Print SHA-256 checksums.",
 	"sha512":   "sha512 [FILE ...]           Print SHA-512 checksums.",
+	"sleep":    "sleep DURATION              Pause for the given duration.",
+	"split":    "split [-l N | -b SIZE] [FILE] PREFIX Split input into multiple files.",
 	"ifconfig": "ifconfig                    Show local IPv4, DNS, gateway, mask, MAC.",
 	"curl":     "curl [OPTIONS] URL          Minimal HTTP/HTTPS client.",
 	"math":     "math [-s N] [-b BASE] EXPR  Evaluate arithmetic expressions like fish math.",
-	"cal":      "cal [YEAR [MONTH]] Display calendar. Today is highlighted in green.",
-	"version":  "version Print shell version.",
-	"which":    "which NAME ... Locate executable in PATH.",
+	"cal":      "cal [YEAR [MONTH]]          Display calendar. Today is highlighted in green.",
+	"version":  "version                     Print shell version.",
+	"which":    "which NAME ...              Locate executable in PATH.",
 	"help":     "help [COMMAND ...]          Show built-in command help.",
 	"exit":     "exit                        Exit the shell.",
 }
@@ -3015,6 +3018,221 @@ func builtinHash(args []string, stdin io.Reader, stdout, stderr io.Writer, newHa
 	return status
 }
 
+func builtinSLEEP(args []string, stdout, stderr io.Writer) int {
+	if len(args) != 2 {
+		fmt.Fprintln(stderr, "usage: sleep DURATION")
+		return 1
+	}
+	d, err := time.ParseDuration(args[1])
+	if err != nil {
+		sec, err2 := strconv.ParseFloat(args[1], 64)
+		if err2 != nil || sec < 0 {
+			fmt.Fprintf(stderr, "sleep: invalid duration %q\n", args[1])
+			return 1
+		}
+		d = time.Duration(sec * float64(time.Second))
+	}
+	time.Sleep(d)
+	return 0
+}
+
+type splitMode int
+
+const (
+	splitModeLines splitMode = iota
+	splitModeBytes
+)
+
+func splitSuffix(n int) string {
+	a := n / 26
+	b := n % 26
+	return string([]byte{byte('a' + a), byte('a' + b)})
+}
+
+func parseSplitArgs(args []string) (mode splitMode, size int64, file string, prefix string, err error) {
+	mode = splitModeLines
+	size = 1000
+	i := 1
+
+	for i < len(args) {
+		switch args[i] {
+		case "-l":
+			if i+1 >= len(args) {
+				return 0, 0, "", "", fmt.Errorf("split: option requires an argument -- l")
+			}
+			n, e := strconv.Atoi(args[i+1])
+			if e != nil || n <= 0 {
+				return 0, 0, "", "", fmt.Errorf("split: invalid line count: %s", args[i+1])
+			}
+			mode = splitModeLines
+			size = int64(n)
+			i += 2
+
+		case "-b":
+			if i+1 >= len(args) {
+				return 0, 0, "", "", fmt.Errorf("split: option requires an argument -- b")
+			}
+			n, e := parseByteSize(args[i+1])
+			if e != nil || n <= 0 {
+				return 0, 0, "", "", fmt.Errorf("split: invalid byte size: %s", args[i+1])
+			}
+			mode = splitModeBytes
+			size = n
+			i += 2
+
+		default:
+			if file == "" {
+				file = args[i]
+			} else if prefix == "" {
+				prefix = args[i]
+			} else {
+				return 0, 0, "", "", fmt.Errorf("usage: split [-l N | -b SIZE] [FILE] [PREFIX]")
+			}
+			i++
+		}
+	}
+
+	if prefix == "" {
+		prefix = "x"
+	}
+	return mode, size, file, prefix, nil
+}
+
+func parseByteSize(s string) (int64, error) {
+	mult := int64(1)
+	switch {
+	case strings.HasSuffix(strings.ToUpper(s), "K"):
+		mult = 1024
+		s = s[:len(s)-1]
+	case strings.HasSuffix(strings.ToUpper(s), "M"):
+		mult = 1024 * 1024
+		s = s[:len(s)-1]
+	case strings.HasSuffix(strings.ToUpper(s), "G"):
+		mult = 1024 * 1024 * 1024
+		s = s[:len(s)-1]
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	return n * mult, nil
+}
+
+func openSplitInput(file string, stdin io.Reader) (io.Reader, func(), error) {
+	if file == "" || file == "-" {
+		return stdin, func() {}, nil
+	}
+	f, err := os.Open(file)
+	if err != nil {
+		return nil, nil, err
+	}
+	return f, func() { _ = f.Close() }, nil
+}
+
+func builtinSPLIT(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	mode, size, file, prefix, err := parseSplitArgs(args)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+
+	in, closeFn, err := openSplitInput(file, stdin)
+	if err != nil {
+		fmt.Fprintf(stderr, "split: %v\n", err)
+		return 1
+	}
+	defer closeFn()
+
+	openPart := func(n int) (*os.File, error) {
+		name := prefix + splitSuffix(n)
+		return os.Create(name)
+	}
+
+	switch mode {
+	case splitModeLines:
+		scanner := bufio.NewScanner(in)
+		buf := make([]byte, 0, 64*1024)
+		scanner.Buffer(buf, 1024*1024)
+
+		part := 0
+		lines := int64(0)
+
+		out, err := openPart(part)
+		if err != nil {
+			fmt.Fprintf(stderr, "split: %v\n", err)
+			return 1
+		}
+		defer out.Close()
+
+		for scanner.Scan() {
+			if lines >= size {
+				_ = out.Close()
+				part++
+				lines = 0
+				out, err = openPart(part)
+				if err != nil {
+					fmt.Fprintf(stderr, "split: %v\n", err)
+					return 1
+				}
+			}
+			fmt.Fprintln(out, scanner.Text())
+			lines++
+		}
+		if err := scanner.Err(); err != nil {
+			fmt.Fprintf(stderr, "split: %v\n", err)
+			return 1
+		}
+
+	case splitModeBytes:
+		part := 0
+		buf := make([]byte, 32*1024)
+
+		out, err := openPart(part)
+		if err != nil {
+			fmt.Fprintf(stderr, "split: %v\n", err)
+			return 1
+		}
+		defer out.Close()
+
+		var written int64
+		for {
+			n, rerr := in.Read(buf)
+			if n > 0 {
+				rest := buf[:n]
+				for len(rest) > 0 {
+					if written >= size {
+						_ = out.Close()
+						part++
+						written = 0
+						out, err = openPart(part)
+						if err != nil {
+							fmt.Fprintf(stderr, "split: %v\n", err)
+							return 1
+						}
+					}
+					need := int(size - written)
+					if need > len(rest) {
+						need = len(rest)
+					}
+					_, _ = out.Write(rest[:need])
+					rest = rest[need:]
+					written += int64(need)
+				}
+			}
+			if rerr == io.EOF {
+				break
+			}
+			if rerr != nil {
+				fmt.Fprintf(stderr, "split: %v\n", rerr)
+				return 1
+			}
+		}
+	}
+
+	_ = stdout
+	return 0
+}
+
 func builtinWHICH(args []string, stdout, stderr io.Writer) int {
 	if len(args) < 2 {
 		fmt.Fprintln(stderr, "usage: which NAME ...")
@@ -3089,6 +3307,7 @@ func isBuiltin(cmd string) bool {
 		"rmdir", "mkdir", "history", "head", "tail",
 		"cut", "sort", "more", "file", "echo", "targz",
 		"md5", "sha256", "sha512",
+		"sleep", "split",
 		"curl", "math", "cal", "which",
 		"version", "help", "exit":
 		return true
@@ -3151,6 +3370,10 @@ func runBuiltin(args []string, hist *History, stdin io.Reader, stdout, stderr io
 		return builtinHash(args, stdin, stdout, stderr, sha256.New)
 	case "sha512":
 		return builtinHash(args, stdin, stdout, stderr, sha512.New)
+	case "sleep":
+		return builtinSLEEP(args, stdout, stderr)
+	case "split":
+		return builtinSPLIT(args, stdin, stdout, stderr)	
 	case "ifconfig":
 		return builtinIFCONFIG(stdout, stderr)
 	case "curl":
