@@ -46,10 +46,10 @@ Unix-like shell
 ### command
 * calendar
 * dos2unix / unix2dos
-* colored csv viewer
 * image viewer
 * clipboard
 
 ### etc
 * for loop
 * vim !
+* perl !

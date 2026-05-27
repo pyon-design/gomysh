@@ -1,5 +1,5 @@
 /*
- * Last Changed: 2026-05-15 Fri 19:34:53
+ * Last Changed: 2026-05-27 Wed 23:40:41
  */
 package main
 
@@ -11,6 +11,7 @@ import (
 	"crypto/md5"
 	"crypto/sha256"
 	"crypto/sha512"
+	"encoding/csv"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -34,15 +35,16 @@ import (
 )
 
 const (
-	Version = "0.5" // -ldflags="-X main.Version=1.2.3"
+	Version = "0.6" // -ldflags="-X main.Version=1.2.3"
 
-	colorOff    = "\x1b[0m"
-	colorRed    = "\x1b[31m"
-	colorGreen  = "\x1b[32m"
-	colorYellow = "\x1b[33m"
-	colorBlue   = "\x1b[34m"
-	colorDir    = "\x1b[01;34m"
-	colorToday  = "\x1b[32m"
+	colorOff     = "\x1b[0m"
+	colorRed     = "\x1b[31m"
+	colorGreen   = "\x1b[32m"
+	colorYellow  = "\x1b[33m"
+	colorBlue    = "\x1b[34m"
+	colorMagenta = "\x1b[35m"
+	colorDir     = "\x1b[01;34m"
+	colorToday   = "\x1b[32m"
 
 	inputPrompt = "$ "
 )
@@ -51,9 +53,24 @@ type Editor struct {
 	buf    []rune
 	cursor int
 	yank   []rune
+	tabStart int
+	tabEnd int
+	tabToken string
+	tabIndex int
+	tabCandidates []string
 }
 
+func (e *Editor) resetTabCompletion() {
+	e.tabStart = 0
+	e.tabEnd = 0
+	e.tabToken = ""
+	e.tabIndex = 0
+	e.tabCandidates = nil
+}
+
+
 func (e *Editor) insertRune(r rune) {
+	e.resetTabCompletion()
 	if e.cursor == len(e.buf) {
 		e.buf = append(e.buf, r)
 		e.cursor++
@@ -64,6 +81,7 @@ func (e *Editor) insertRune(r rune) {
 }
 
 func (e *Editor) backspace() {
+	e.resetTabCompletion()
 	if e.cursor == 0 {
 		return
 	}
@@ -89,6 +107,7 @@ func (e *Editor) moveRight() {
 func (e *Editor) clear() {
 	e.buf = nil
 	e.cursor = 0
+	e.resetTabCompletion()
 }
 
 func (e *Editor) line() string {
@@ -118,9 +137,11 @@ func (e *Editor) replaceRange(start, end int, s string) {
 func (e *Editor) setLine(s string) {
 	e.buf = []rune(s)
 	e.cursor = len(e.buf)
+	e.resetTabCompletion()
 }
 
 func (e *Editor) killToStart() {
+	e.resetTabCompletion()
 	if e.cursor <= 0 {
 		e.yank = nil
 		return
@@ -131,6 +152,7 @@ func (e *Editor) killToStart() {
 }
 
 func (e *Editor) killToEnd() {
+	e.resetTabCompletion()
 	if e.cursor >= len(e.buf) {
 		e.yank = nil
 		return
@@ -140,6 +162,7 @@ func (e *Editor) killToEnd() {
 }
 
 func (e *Editor) killPrevWord() {
+	e.resetTabCompletion()
 	if e.cursor <= 0 {
 		e.yank = nil
 		return
@@ -160,6 +183,7 @@ func (e *Editor) killPrevWord() {
 }
 
 func (e *Editor) yankText() {
+	e.resetTabCompletion()
 	if len(e.yank) == 0 {
 		return
 	}
@@ -228,6 +252,9 @@ func shortenPromptPath(path string) string {
 	parts := strings.Split(path, "/")
 	for i, part := range parts {
 		if part == "" || part == "." || part == ".." {
+			continue
+		}
+		if i >= len(parts) - 2 {
 			continue
 		}
 		if utf8.RuneCountInString(part) >= 4 {
@@ -619,7 +646,7 @@ var builtinNames = []string{
 	"rmdir", "mkdir", "history", "head", "tail",
 	"cut", "sort", "more", "file", "echo", "targz",
 	"md5", "sha256", "sha512",	
-	"sleep", "split",
+	"sleep", "split", "vim",
 	"ifconfig", "curl", "math", "cal", "which",
 	"version", "help", "exit",
 }
@@ -653,6 +680,7 @@ var builtinHelp = map[string]string{
 	"sha512":   "sha512 [FILE ...]           Print SHA-512 checksums.",
 	"sleep":    "sleep DURATION              Pause for the given duration.",
 	"split":    "split [-l N | -b SIZE] [FILE] PREFIX Split input into multiple files.",
+	"vim":      "vim [FILE]                  Open the built-in full-screen text editor.",
 	"ifconfig": "ifconfig                    Show local IPv4, DNS, gateway, mask, MAC.",
 	"curl":     "curl [OPTIONS] URL          Minimal HTTP/HTTPS client.",
 	"math":     "math [-s N] [-b BASE] EXPR  Evaluate arithmetic expressions like fish math.",
@@ -729,6 +757,10 @@ func uniqueSorted(xs []string) []string {
 	return out
 }
 
+func hasPrefixFold(s, prefix string) bool {
+	return len(prefix) == 0 || strings.HasPrefix(strings.ToLower(s), strings.ToLower(prefix))
+}
+
 func longestCommonPrefix(xs []string) string {
 	if len(xs) == 0 {
 		return ""
@@ -781,7 +813,7 @@ func commandCandidates(prefix string) []string {
 
 	var hits []string
 	for _, s := range all {
-		if strings.HasPrefix(s, prefix) {
+		if hasPrefixFold(s, prefix) {
 			hits = append(hits, s)
 		}
 	}
@@ -816,7 +848,7 @@ func pathCandidates(prefix string) []string {
 	var hits []string
 	for _, ent := range entries {
 		name := ent.Name()
-		if strings.HasPrefix(name, basePart) {
+		if hasPrefixFold(name, basePart) {
 			full := name
 			if dirPart != "." {
 				full = filepath.Join(dirPart, name)
@@ -832,33 +864,78 @@ func pathCandidates(prefix string) []string {
 	return hits
 }
 
+func allPathCandidates() []string {
+	return pathCandidates("")
+}
+
 func completeAtCursor(e *Editor) {
 	start, end := currentTokenRange(e.buf, e.cursor)
 	token := string(e.buf[start:e.cursor])
 	index := tokenIndexAtCursor(e.buf, start)
 
+	if index > 0 && token == "" &&
+		e.tabCandidates != nil &&
+		e.tabStart == start &&
+		e.tabEnd == end &&
+		e.tabToken == token &&
+		len(e.tabCandidates) > 0 {
+		e.tabIndex = (e.tabIndex + 1) % len(e.tabCandidates)
+		e.replaceRange(start, end, e.tabCandidates[e.tabIndex])
+		e.tabStart = start
+		e.tabEnd = start + len([]rune(e.tabCandidates[e.tabIndex]))
+		e.tabToken = ""
+		return
+	}
+
 	var candidates []string
 	if index == 0 {
 		candidates = commandCandidates(token)
 	} else {
-		candidates = pathCandidates(token)
+		if token == "" {
+			candidates = allPathCandidates()
+		} else {
+			candidates = pathCandidates(token)
+		}
 	}
 
 	if len(candidates) == 0 {
+		e.resetTabCompletion()
 		return
 	}
 
 	if len(candidates) == 1 {
 		e.replaceRange(start, end, candidates[0])
+		e.tabStart = start
+		e.tabEnd = start + len([]rune(candidates[0]))
+		e.tabToken = token
+		e.tabIndex = 0
+		e.tabCandidates = candidates
+		return
+	}
+
+	if index > 0 && token == "" {
+		e.tabStart = start
+		e.tabEnd = end
+		e.tabToken = token
+		e.tabIndex = 0
+		e.tabCandidates = candidates
+		e.replaceRange(start, end, candidates[0])
+		e.tabEnd = start + len([]rune(candidates[0]))
 		return
 	}
 
 	lcp := longestCommonPrefix(candidates)
 	if lcp != "" && lcp != token {
 		e.replaceRange(start, end, lcp)
+		e.tabStart = start
+		e.tabEnd = start + len([]rune(lcp))
+		e.tabToken = token
+		e.tabIndex = 0
+		e.tabCandidates = candidates
 		return
 	}
 
+	e.resetTabCompletion()
 	fmt.Print("\r\n")
 	for _, c := range candidates {
 		fmt.Println(c)
@@ -1007,9 +1084,76 @@ func catReader(out io.Writer, name string, r io.Reader) error {
 	return nil
 }
 
+var csvColumnColors = []string{colorRed, colorGreen, colorYellow, colorBlue, colorMagenta}
+
+func looksLikeCSV(name string, sample []byte) bool {
+	if strings.EqualFold(filepath.Ext(name), ".csv") {
+		return true
+	}
+	if len(sample) == 0 || bytes.IndexByte(sample, ',') < 0 {
+		return false
+	}
+	lines := strings.Split(string(sample), "\n")
+	checked := 0
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		checked++
+		r := csv.NewReader(strings.NewReader(line))
+		rec, err := r.Read()
+		if err != nil || len(rec) < 2 {
+			return false
+		}
+		if checked >= 3 {
+			return true
+		}
+	}
+	return checked > 0
+}
+
+func writeCSVColored(out io.Writer, r io.Reader) error {
+	cr := csv.NewReader(r)
+	cr.FieldsPerRecord = -1
+	for {
+		rec, err := cr.Read()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		for i, field := range rec {
+			if i > 0 {
+				fmt.Fprint(out, ",")
+			}
+			color := csvColumnColors[i%len(csvColumnColors)]
+			fmt.Fprint(out, color, field, colorOff)
+		}
+		fmt.Fprintln(out)
+	}
+}
+
+func catMaybeCSV(out io.Writer, name string, r io.Reader) error {
+	colorize := isTerminalWriter(out)
+	br := bufio.NewReader(r)
+	sample, err := br.Peek(4096)
+	if err != nil && err != io.EOF {
+		return fmt.Errorf("cat: %s: %w", name, err)
+	}
+	if !colorize || !looksLikeCSV(name, sample) {
+		return catReader(out, name, br)
+	}
+	if err := writeCSVColored(out, br); err != nil {
+		return fmt.Errorf("cat: %s: %w", name, err)
+	}
+	return nil
+}
+
 func builtinCAT(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 1 {
-		if err := catReader(stdout, "<stdin>", stdin); err != nil {
+		if err := catMaybeCSV(stdout, "<stdin>", stdin); err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
@@ -1030,7 +1174,7 @@ func builtinCAT(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			status = 1
 			continue
 		}
-		err = catReader(stdout, file, f)
+		err = catMaybeCSV(stdout, file, f)
 		_ = f.Close()
 		if err != nil {
 			fmt.Fprintln(stderr, err)
@@ -3307,8 +3451,8 @@ func isBuiltin(cmd string) bool {
 		"rmdir", "mkdir", "history", "head", "tail",
 		"cut", "sort", "more", "file", "echo", "targz",
 		"md5", "sha256", "sha512",
-		"sleep", "split",
-		"curl", "math", "cal", "which",
+		"sleep", "split", "vim",
+		"ifconfig", "curl", "math", "cal", "which",
 		"version", "help", "exit":
 		return true
 	default:
@@ -3374,6 +3518,8 @@ func runBuiltin(args []string, hist *History, stdin io.Reader, stdout, stderr io
 		return builtinSLEEP(args, stdout, stderr)
 	case "split":
 		return builtinSPLIT(args, stdin, stdout, stderr)	
+	case "vim":
+		return builtinVIM(args, stdin, stdout, stderr)	
 	case "ifconfig":
 		return builtinIFCONFIG(stdout, stderr)
 	case "curl":
