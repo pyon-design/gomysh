@@ -1,5 +1,5 @@
 /*
- * Last Changed: 2026-05-27 Wed 23:40:41
+ * Last Changed: 2026-05-29 Fri 05:02:36
  */
 package main
 
@@ -35,7 +35,7 @@ import (
 )
 
 const (
-	Version = "0.6" // -ldflags="-X main.Version=1.2.3"
+	Version = "0.7" // -ldflags="-X main.Version=1.2.3"
 
 	colorOff     = "\x1b[0m"
 	colorRed     = "\x1b[31m"
@@ -646,7 +646,7 @@ var builtinNames = []string{
 	"rmdir", "mkdir", "history", "head", "tail",
 	"cut", "sort", "more", "file", "echo", "targz",
 	"md5", "sha256", "sha512",	
-	"sleep", "split", "vim",
+	"sleep", "split", "vim", "mperl",
 	"ifconfig", "curl", "math", "cal", "which",
 	"version", "help", "exit",
 }
@@ -655,7 +655,7 @@ var builtinHelp = map[string]string{
 	"cd":       "cd [DIR]                    Change current directory.",
 	"pwd":      "pwd                         Print current working directory.",
 	"ls":       "ls [-a] [-l] [PATH ...]     List files; directories are shown with trailing '/'.",
-	"cat":      "cat [FILE ...]              Concatenate files to standard output.",
+	"cat":      "cat [-n] [FILE ...]         Concatenate files to standard output; -n shows line numbers.",
 	"grep":     "grep PATTERN [FILE ...]     Print lines containing PATTERN.",
 	"touch":    "touch FILE ...              Create files or update timestamps.",
 	"nc":       "nc [-u] [-l] HOST PORT      Simple TCP/UDP client or listener.",
@@ -681,6 +681,7 @@ var builtinHelp = map[string]string{
 	"sleep":    "sleep DURATION              Pause for the given duration.",
 	"split":    "split [-l N | -b SIZE] [FILE] PREFIX Split input into multiple files.",
 	"vim":      "vim [FILE]                  Open the built-in full-screen text editor.",
+	"mperl":    "mperl [FILE ...]            Perl one-liner compatible input filter; reads files or stdin and writes them unchanged.",
 	"ifconfig": "ifconfig                    Show local IPv4, DNS, gateway, mask, MAC.",
 	"curl":     "curl [OPTIONS] URL          Minimal HTTP/HTTPS client.",
 	"math":     "math [-s N] [-b BASE] EXPR  Evaluate arithmetic expressions like fish math.",
@@ -1152,21 +1153,71 @@ func catMaybeCSV(out io.Writer, name string, r io.Reader) error {
 }
 
 func builtinCAT(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	if len(args) == 1 {
-		if err := catMaybeCSV(stdout, "<stdin>", stdin); err != nil {
+	numberLines := false
+	var rawFiles []string
+
+	for _, a := range args[1:] {
+		if strings.HasPrefix(a, "-") && a != "-" {
+			switch a {
+			case "-n":
+				numberLines = true
+			default:
+				fmt.Fprintf(stderr, "cat: unsupported option %s\n", a)
+				fmt.Fprintln(stderr, "usage: cat [-n] [FILE ...]")
+				return 1
+			}
+		} else {
+			rawFiles = append(rawFiles, a)
+		}
+	}
+
+	catNumberedReader := func(out io.Writer, name string, r io.Reader, lineNo *int) error {
+		br := bufio.NewReader(r)
+
+		for {
+			line, err := br.ReadString('\n')
+			if len(line) > 0 {
+				fmt.Fprintf(out, "%6d  %s", *lineNo, line)
+				*lineNo++
+			}
+
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return fmt.Errorf("cat: %s: %w", name, err)
+			}
+		}
+
+		return nil
+	}
+
+	if len(rawFiles) == 0 {
+		if numberLines {
+			lineNo := 1
+			if err := catNumberedReader(stdout, "", stdin, &lineNo); err != nil {
+				fmt.Fprintln(stderr, err)
+				return 1
+			}
+			return 0
+		}
+
+		if err := catReader(stdout, "", stdin); err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
 		return 0
 	}
 
-	files, err := expandWildcards(args[1:])
+	files, err := expandWildcards(rawFiles)
 	if err != nil {
 		fmt.Fprintf(stderr, "cat: glob error: %v\n", err)
 		return 1
 	}
 
 	status := 0
+	lineNo := 1
+
 	for _, file := range files {
 		f, err := os.Open(file)
 		if err != nil {
@@ -1174,13 +1225,20 @@ func builtinCAT(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			status = 1
 			continue
 		}
-		err = catMaybeCSV(stdout, file, f)
+
+		if numberLines {
+			err = catNumberedReader(stdout, file, f, &lineNo)
+		} else {
+			err = catReader(stdout, file, f)
+		}
+
 		_ = f.Close()
 		if err != nil {
 			fmt.Fprintln(stderr, err)
 			status = 1
 		}
 	}
+
 	return status
 }
 
@@ -3451,7 +3509,7 @@ func isBuiltin(cmd string) bool {
 		"rmdir", "mkdir", "history", "head", "tail",
 		"cut", "sort", "more", "file", "echo", "targz",
 		"md5", "sha256", "sha512",
-		"sleep", "split", "vim",
+		"sleep", "split", "vim", "mperl",
 		"ifconfig", "curl", "math", "cal", "which",
 		"version", "help", "exit":
 		return true
@@ -3520,6 +3578,8 @@ func runBuiltin(args []string, hist *History, stdin io.Reader, stdout, stderr io
 		return builtinSPLIT(args, stdin, stdout, stderr)	
 	case "vim":
 		return builtinVIM(args, stdin, stdout, stderr)	
+	case "mperl":
+		return builtinMPERL(args, stdin, stdout, stderr)
 	case "ifconfig":
 		return builtinIFCONFIG(stdout, stderr)
 	case "curl":
