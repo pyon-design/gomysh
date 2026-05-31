@@ -1,6 +1,6 @@
 /*
- * Last Changed: 2026-05-29 Fri 05:02:36
- */
+* Last Changed: 2026-05-31 Sun 15:09:39
+*/
 package main
 
 import (
@@ -35,7 +35,7 @@ import (
 )
 
 const (
-	Version = "0.7" // -ldflags="-X main.Version=1.2.3"
+	Version = "0.9" // -ldflags="-X main.Version=1.2.3"
 
 	colorOff     = "\x1b[0m"
 	colorRed     = "\x1b[31m"
@@ -317,7 +317,7 @@ func promptLine1Display() string {
 	dirName := currentDirName()
 
 	left := "[" + colorRed + tm + colorOff + "] " + colorYellow + userName + colorOff +
-	        "@" + colorGreen + hostName + colorOff + " in " + colorBlue + dirName + colorOff
+	"@" + colorGreen + hostName + colorOff + " in " + colorBlue + dirName + colorOff
 	right := colorRed + dt + colorOff
 
 	width, _, err := term.GetSize(int(os.Stdout.Fd()))
@@ -641,7 +641,7 @@ func displayName(name string, isDir bool, colorize bool) string {
 }
 
 var builtinNames = []string{
-	"cd", "pwd", "ls", "cat", "grep", "touch",
+	"cd", "pwd", "ls", "cat", "tac", "grep", "touch",
 	"nc", "wc", "uniq", "cp", "mv", "rm",
 	"rmdir", "mkdir", "history", "head", "tail",
 	"cut", "sort", "more", "file", "echo", "targz",
@@ -656,6 +656,7 @@ var builtinHelp = map[string]string{
 	"pwd":      "pwd                         Print current working directory.",
 	"ls":       "ls [-a] [-l] [PATH ...]     List files; directories are shown with trailing '/'.",
 	"cat":      "cat [-n] [FILE ...]         Concatenate files to standard output; -n shows line numbers.",
+	"tac":      "tac [FILE]                  Print lines in reverse order",
 	"grep":     "grep PATTERN [FILE ...]     Print lines containing PATTERN.",
 	"touch":    "touch FILE ...              Create files or update timestamps.",
 	"nc":       "nc [-u] [-l] HOST PORT      Simple TCP/UDP client or listener.",
@@ -874,17 +875,15 @@ func completeAtCursor(e *Editor) {
 	token := string(e.buf[start:e.cursor])
 	index := tokenIndexAtCursor(e.buf, start)
 
-	if index > 0 && token == "" &&
-		e.tabCandidates != nil &&
-		e.tabStart == start &&
-		e.tabEnd == end &&
-		e.tabToken == token &&
-		len(e.tabCandidates) > 0 {
+	if e.tabCandidates != nil &&
+	e.tabStart == start &&
+	e.tabEnd == end &&
+	e.tabToken == token &&
+	len(e.tabCandidates) > 0 {
 		e.tabIndex = (e.tabIndex + 1) % len(e.tabCandidates)
 		e.replaceRange(start, end, e.tabCandidates[e.tabIndex])
 		e.tabStart = start
 		e.tabEnd = start + len([]rune(e.tabCandidates[e.tabIndex]))
-		e.tabToken = ""
 		return
 	}
 
@@ -908,7 +907,7 @@ func completeAtCursor(e *Editor) {
 		e.replaceRange(start, end, candidates[0])
 		e.tabStart = start
 		e.tabEnd = start + len([]rune(candidates[0]))
-		e.tabToken = token
+		e.tabToken = string(e.buf[start:e.cursor])
 		e.tabIndex = 0
 		e.tabCandidates = candidates
 		return
@@ -930,7 +929,7 @@ func completeAtCursor(e *Editor) {
 		e.replaceRange(start, end, lcp)
 		e.tabStart = start
 		e.tabEnd = start + len([]rune(lcp))
-		e.tabToken = token
+		e.tabToken = string(e.buf[start:e.cursor])
 		e.tabIndex = 0
 		e.tabCandidates = candidates
 		return
@@ -1242,7 +1241,69 @@ func builtinCAT(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	return status
 }
 
+func tacReader(r io.Reader, out io.Writer) error {
+	lines, err := readAllLines(r)
+	if err != nil {
+		return err
+	}
+	for i := len(lines) - 1; i >= 0; i-- {
+		fmt.Fprintln(out, lines[i])
+	}
+	return nil
+}
+
+func builtinTAC(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if len(args) > 2 {
+		fmt.Fprintln(stderr, "usage: tac [FILE]")
+		return 1
+	}
+
+	var r io.Reader = stdin
+	var file string
+
+	if len(args) == 2 {
+		file = args[1]
+		files, err := expandWildcards([]string{file})
+		if err != nil {
+			fmt.Fprintf(stderr, "tac: glob error: %v\n", err)
+			return 1
+		}
+		if len(files) != 1 {
+			fmt.Fprintln(stderr, "tac: expected exactly one input file")
+			return 1
+		}
+
+		f, err := os.Open(files[0])
+		if err != nil {
+			fmt.Fprintf(stderr, "tac: %s: %v\n", files[0], err)
+			return 1
+		}
+		defer f.Close()
+		r = f
+	}
+
+	if err := tacReader(r, stdout); err != nil {
+		if file == "" {
+			fmt.Fprintf(stderr, "tac: %v\n", err)
+		} else {
+			fmt.Fprintf(stderr, "tac: %s: %v\n", file, err)
+		}
+		return 1
+	}
+
+	return 0
+}
+
+func grepHighlight(line, pattern string, colorize bool) string {
+	if !colorize || pattern == "" {
+		return line
+	}
+	return strings.ReplaceAll(line, pattern, colorRed+pattern+colorOff)
+}
+
 func grepReader(pattern string, r io.Reader, out io.Writer, label string, showName bool) error {
+	colorize := isTerminalWriter(out)
+
 	scanner := bufio.NewScanner(r)
 	buf := make([]byte, 0, 64*1024)
 	scanner.Buffer(buf, 1024*1024)
@@ -1250,6 +1311,7 @@ func grepReader(pattern string, r io.Reader, out io.Writer, label string, showNa
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.Contains(line, pattern) {
+			line = grepHighlight(line, pattern, colorize)
 			if showName {
 				fmt.Fprintf(out, "%s:%s\n", label, line)
 			} else {
@@ -3504,7 +3566,7 @@ func builtinHELP(args []string, stdout, stderr io.Writer) int {
 
 func isBuiltin(cmd string) bool {
 	switch cmd {
-		case "cd", "pwd", "ls", "cat", "grep", "touch",
+		case "cd", "pwd", "ls", "cat", "tac", "grep", "touch",
 		"nc", "wc", "uniq", "cp", "mv", "rm",
 		"rmdir", "mkdir", "history", "head", "tail",
 		"cut", "sort", "more", "file", "echo", "targz",
@@ -3528,6 +3590,8 @@ func runBuiltin(args []string, hist *History, stdin io.Reader, stdout, stderr io
 		return builtinLS(args, stdout, stderr)
 	case "cat":
 		return builtinCAT(args, stdin, stdout, stderr)
+	case "tac":
+		return builtinTAC(args, stdin, stdout, stderr)
 	case "grep":
 		return builtinGREP(args, stdin, stdout, stderr)
 	case "touch":
@@ -3762,6 +3826,7 @@ func main() {
 
 	editor := &Editor{}
 	history := NewHistory()
+	builtinVERSION(os.Stdout);
 	printPrompt()
 
 	for {
@@ -3809,13 +3874,13 @@ func main() {
 				editor.refresh(os.Stdout)
 			}
 
-		case len(key) == 3 && key[0] == 0x1b && key[1] == 0x5b && key[2] == 0x42: // ↓ (Down)
+			case len(key) == 3 && key[0] == 0x1b && key[1] == 0x5b && key[2] == 0x42: // ↓ (Down)
 			if line, ok := history.Next(); ok {
 				editor.setLine(line)
 				editor.refresh(os.Stdout)
 			}
 
-		case len(key) == 3 && key[0] == 0x1b && key[1] == 0x5b && key[2] == 0x41: // ↑ (Up)
+			case len(key) == 3 && key[0] == 0x1b && key[1] == 0x5b && key[2] == 0x41: // ↑ (Up)
 			if line, ok := history.Prev(editor.line()); ok {
 				editor.setLine(line)
 				editor.refresh(os.Stdout)

@@ -30,6 +30,7 @@ Unix-like shell
 * sleep
 * sort
 * split
+* tac
 * tail
 * targz
 * touch
