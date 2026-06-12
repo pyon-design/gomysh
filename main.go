@@ -1,5 +1,5 @@
 /*
-* Last Changed: 2026-05-31 Sun 15:09:39
+* Last Changed: 2026-06-13 Sat 07:25:13
 */
 package main
 
@@ -35,7 +35,7 @@ import (
 )
 
 const (
-	Version = "0.9" // -ldflags="-X main.Version=1.2.3"
+	Version = "0.10" // -ldflags="-X main.Version=1.2.3"
 
 	colorOff     = "\x1b[0m"
 	colorRed     = "\x1b[31m"
@@ -661,7 +661,7 @@ var builtinHelp = map[string]string{
 	"touch":    "touch FILE ...              Create files or update timestamps.",
 	"nc":       "nc [-u] [-l] HOST PORT      Simple TCP/UDP client or listener.",
 	"wc":       "wc [-l] [FILE ...]          Print line, word, and byte counts.",
-	"uniq":     "uniq [FILE]                 Filter adjacent duplicate lines.",
+	"uniq":     "uniq [-c] [-d] [FILE]       Filter adjacent duplicate lines.",
 	"cp":       "cp SRC DST                  Copy a file.",
 	"mv":       "mv SRC DST                  Rename or move a file or directory.",
 	"rm":       "rm FILE ...                 Remove files.",
@@ -1723,15 +1723,28 @@ func builtinWC(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 }
 
 func builtinUNIQ(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	if len(args) > 2 {
-		fmt.Fprintln(stderr, "usage: uniq [FILE]")
-		return 1
+	countMode := false
+	dupOnly := false
+	var file string
+
+	for i := 1; i < len(args); i++ {
+		switch args[i] {
+		case "-c":
+			countMode = true
+		case "-d":
+			dupOnly = true
+		default:
+			if strings.HasPrefix(args[i], "-") && args[i] != "-" {
+				fmt.Fprintf(stderr, "uniq: unsupported option %s\n", args[i])
+				fmt.Fprintln(stderr, "usage: uniq [-c] [-d] [FILE]")
+				return 1
+			}
+			file = args[i]
+		}
 	}
 
 	var r io.Reader = stdin
-	var file string
-	if len(args) == 2 {
-		file = args[1]
+	if file != "" {
 		files, err := expandWildcards([]string{file})
 		if err != nil {
 			fmt.Fprintf(stderr, "uniq: glob error: %v\n", err)
@@ -1756,14 +1769,50 @@ func builtinUNIQ(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	first := true
 	prev := ""
-	for scanner.Scan() {
-		line := scanner.Text()
-		if first || line != prev {
-			fmt.Fprintln(stdout, line)
-			prev = line
-			first = false
+	count := 0
+
+	flush := func() {
+		if first {
+			return
+		}
+		if dupOnly {
+			if count > 1 {
+				if countMode {
+					fmt.Fprintf(stdout, "%7d %s\n", count, prev)
+				} else {
+					fmt.Fprintln(stdout, prev)
+				}
+			}
+		} else if countMode {
+			fmt.Fprintf(stdout, "%7d %s\n", count, prev)
+		} else {
+			fmt.Fprintln(stdout, prev)
 		}
 	}
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if first {
+			prev = line
+			count = 1
+			first = false
+			continue
+		}
+
+		if line == prev {
+			count++
+			continue
+		}
+
+		flush()
+		prev = line
+		count = 1
+	}
+
+	if !first {
+		flush()
+	}
+
 	if err := scanner.Err(); err != nil {
 		if file == "" {
 			fmt.Fprintf(stderr, "uniq: %v\n", err)
@@ -1772,6 +1821,7 @@ func builtinUNIQ(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		}
 		return 1
 	}
+
 	return 0
 }
 
