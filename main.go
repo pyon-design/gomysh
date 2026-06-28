@@ -1,5 +1,5 @@
 /*
-* Last Changed: 2026-06-13 Sat 07:25:13
+* Last Changed: 2026-06-28 Sun 12:01:02
 */
 package main
 
@@ -35,7 +35,7 @@ import (
 )
 
 const (
-	Version = "0.10" // -ldflags="-X main.Version=1.2.3"
+	Version = "0.11" // -ldflags="-X main.Version=1.2.3"
 
 	colorOff     = "\x1b[0m"
 	colorRed     = "\x1b[31m"
@@ -1294,24 +1294,42 @@ func builtinTAC(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func grepHighlight(line, pattern string, colorize bool) string {
+func grepHighlight(line, pattern string, colorize bool, ignoreCase bool) string {
 	if !colorize || pattern == "" {
+		return line
+	}
+	if ignoreCase {
+		// 表示の都合で元の line を返す。必要なら一致部分の強調を別途実装する。
 		return line
 	}
 	return strings.ReplaceAll(line, pattern, colorRed+pattern+colorOff)
 }
 
-func grepReader(pattern string, r io.Reader, out io.Writer, label string, showName bool) error {
+func grepReader(pattern string, r io.Reader, out io.Writer, label string, showName bool, ignoreCase bool, invert bool) error {
 	colorize := isTerminalWriter(out)
-
 	scanner := bufio.NewScanner(r)
 	buf := make([]byte, 0, 64*1024)
 	scanner.Buffer(buf, 1024*1024)
 
+	pat := pattern
+	if ignoreCase {
+		pat = strings.ToLower(pattern)
+	}
+
 	for scanner.Scan() {
 		line := scanner.Text()
-		if strings.Contains(line, pattern) {
-			line = grepHighlight(line, pattern, colorize)
+		target := line
+		if ignoreCase {
+			target = strings.ToLower(line)
+		}
+		matched := strings.Contains(target, pat)
+		if invert {
+			matched = !matched
+		}
+		if matched {
+			if !invert {
+				line = grepHighlight(line, pattern, colorize, ignoreCase)
+			}
 			if showName {
 				fmt.Fprintf(out, "%s:%s\n", label, line)
 			} else {
@@ -1320,51 +1338,74 @@ func grepReader(pattern string, r io.Reader, out io.Writer, label string, showNa
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("grep: %s: %w", label, err)
+		return fmt.Errorf("grep %s: %w", label, err)
 	}
 	return nil
 }
 
 func builtinGREP(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	if len(args) < 2 {
-		fmt.Fprintln(stderr, "usage: grep PATTERN [FILE ...]")
+	ignoreCase := false
+	invert := false
+
+	var pattern string
+	var files []string
+
+	for i := 1; i < len(args); i++ {
+		a := args[i]
+		switch a {
+		case "-i":
+			ignoreCase = true
+		case "-v":
+			invert = true
+		default:
+			if strings.HasPrefix(a, "-") && a != "-" {
+				fmt.Fprintf(stderr, "grep unsupported option %s\n", a)
+				fmt.Fprintln(stderr, "usage: grep [-i] [-v] PATTERN FILE ...")
+				return 1
+			}
+			if pattern == "" {
+				pattern = a
+			} else {
+				files = append(files, a)
+			}
+		}
+	}
+
+	if pattern == "" {
+		fmt.Fprintln(stderr, "usage: grep [-i] [-v] PATTERN FILE ...")
 		return 1
 	}
 
-	pattern := args[1]
-
-	if len(args) == 2 {
-		if err := grepReader(pattern, stdin, stdout, "<stdin>", false); err != nil {
+	if len(files) == 0 {
+		if err := grepReader(pattern, stdin, stdout, "stdin", false, ignoreCase, invert); err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
 		return 0
 	}
 
-	files, err := expandWildcards(args[2:])
+	expanded, err := expandWildcards(files)
 	if err != nil {
-		fmt.Fprintf(stderr, "grep: glob error: %v\n", err)
+		fmt.Fprintf(stderr, "grep glob error: %v\n", err)
 		return 1
 	}
 
-	showName := len(files) > 1
+	showName := len(expanded) > 1
 	status := 0
-
-	for _, file := range files {
+	for _, file := range expanded {
 		f, err := os.Open(file)
 		if err != nil {
-			fmt.Fprintf(stderr, "grep: %s: %v\n", file, err)
+			fmt.Fprintf(stderr, "grep %s: %v\n", file, err)
 			status = 1
 			continue
 		}
-		err = grepReader(pattern, f, stdout, file, showName)
-		_ = f.Close()
+		err = grepReader(pattern, f, stdout, file, showName, ignoreCase, invert)
+		f.Close()
 		if err != nil {
 			fmt.Fprintln(stderr, err)
 			status = 1
 		}
 	}
-
 	return status
 }
 
@@ -1728,35 +1769,39 @@ func builtinUNIQ(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	var file string
 
 	for i := 1; i < len(args); i++ {
-		switch args[i] {
-		case "-c":
-			countMode = true
-		case "-d":
-			dupOnly = true
-		default:
-			if strings.HasPrefix(args[i], "-") && args[i] != "-" {
-				fmt.Fprintf(stderr, "uniq: unsupported option %s\n", args[i])
-				fmt.Fprintln(stderr, "usage: uniq [-c] [-d] [FILE]")
-				return 1
+		a := args[i]
+		if strings.HasPrefix(a, "-") && a != "-" {
+			for _, ch := range a[1:] {
+				switch ch {
+				case 'c':
+					countMode = true
+				case 'd':
+					dupOnly = true
+				default:
+					fmt.Fprintf(stderr, "uniq unsupported option -%c\n", ch)
+					fmt.Fprintln(stderr, "usage: uniq -c -d FILE")
+					return 1
+				}
 			}
-			file = args[i]
+			continue
 		}
+		file = a
 	}
 
 	var r io.Reader = stdin
 	if file != "" {
 		files, err := expandWildcards([]string{file})
 		if err != nil {
-			fmt.Fprintf(stderr, "uniq: glob error: %v\n", err)
+			fmt.Fprintf(stderr, "uniq glob error: %v\n", err)
 			return 1
 		}
 		if len(files) != 1 {
-			fmt.Fprintln(stderr, "uniq: expected exactly one input file")
+			fmt.Fprintln(stderr, "uniq expected exactly one input file")
 			return 1
 		}
 		f, err := os.Open(files[0])
 		if err != nil {
-			fmt.Fprintf(stderr, "uniq: %s: %v\n", files[0], err)
+			fmt.Fprintf(stderr, "uniq %s: %v\n", files[0], err)
 			return 1
 		}
 		defer f.Close()
@@ -1775,15 +1820,10 @@ func builtinUNIQ(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		if first {
 			return
 		}
-		if dupOnly {
-			if count > 1 {
-				if countMode {
-					fmt.Fprintf(stdout, "%7d %s\n", count, prev)
-				} else {
-					fmt.Fprintln(stdout, prev)
-				}
-			}
-		} else if countMode {
+		if dupOnly && count <= 1 {
+			return
+		}
+		if countMode {
 			fmt.Fprintf(stdout, "%7d %s\n", count, prev)
 		} else {
 			fmt.Fprintln(stdout, prev)
@@ -1798,12 +1838,10 @@ func builtinUNIQ(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			first = false
 			continue
 		}
-
 		if line == prev {
 			count++
 			continue
 		}
-
 		flush()
 		prev = line
 		count = 1
@@ -1814,14 +1852,13 @@ func builtinUNIQ(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	if err := scanner.Err(); err != nil {
-		if file == "" {
-			fmt.Fprintf(stderr, "uniq: %v\n", err)
+		if file != "" {
+			fmt.Fprintf(stderr, "uniq %s: %v\n", file, err)
 		} else {
-			fmt.Fprintf(stderr, "uniq: %s: %v\n", file, err)
+			fmt.Fprintf(stderr, "uniq: %v\n", err)
 		}
 		return 1
 	}
-
 	return 0
 }
 
